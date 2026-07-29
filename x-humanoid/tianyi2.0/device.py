@@ -762,10 +762,12 @@ class ArmPlugin:
             self._ctrl_publisher = self._pub_node.create_publisher(
                 CmdMotorCtrl, "/arm/cmd_ctrl", _RELIABLE_QOS)
             print("[ArmPlugin] publishers created")
-            self._zero_publisher = self._pub_node.create_publisher(
-                String, "/arm/cmd_set_zero", _RELIABLE_QOS)
         except ImportError as e:
             print(f"[ArmPlugin] WARNING: msg import failed ({e})")
+
+        # cmd_set_zero 使用 std_msgs/String，不依赖 bodyctrl_msgs
+        self._zero_publisher = self._pub_node.create_publisher(
+            String, "/arm/cmd_set_zero", _RELIABLE_QOS)
 
     def stop(self):
         pass
