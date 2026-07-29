@@ -338,7 +338,7 @@ def main():
     _bundle = TianyiDeviceBundle(cfg, namespace, ros2, slamtec_client)
     _bundle.start_all()
 
-    _start_registration(mcp_port, cfg.get("name", "Tianyi 2.0 Pro"), "driver")
+    _start_registration(mcp_port, cfg.get("name", "Tianyi 2.0-c"), "driver")
 
     server = ThreadingHTTPServer(("", mcp_port), make_handler())
     print(f"[bundle] MCP server → http://localhost:{mcp_port}")
