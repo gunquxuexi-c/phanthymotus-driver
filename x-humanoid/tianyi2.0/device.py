@@ -730,7 +730,7 @@ class ArmPlugin:
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["move_pos", "move_ctrl"],
+                    "action": {"type": "string", "enum": ["move_pos", "move_ctrl", "arm_zero"],
                                "description": "控制模式"},
                     "side": {"type": "string", "enum": ["left", "right", "both"],
                              "description": "控制哪只手臂"},
@@ -748,6 +748,8 @@ class ArmPlugin:
                                  "description": "位置模式: 移动手臂关节到指定角度(度)"},
                     "move_ctrl": {"params": ["side", "positions", "kp", "kd"],
                                   "description": "力位混合模式: 指定位置+增益"},
+                    "arm_zero": {"params": ["side"],
+                                 "description": "手臂关节标零: 发送关节ID到 /arm/cmd_set_zero"},
                 },
             },
         }
@@ -760,6 +762,8 @@ class ArmPlugin:
             self._ctrl_publisher = self._pub_node.create_publisher(
                 CmdMotorCtrl, "/arm/cmd_ctrl", _RELIABLE_QOS)
             print("[ArmPlugin] publishers created")
+            self._zero_publisher = self._pub_node.create_publisher(
+                String, "/arm/cmd_set_zero", _RELIABLE_QOS)
         except ImportError as e:
             print(f"[ArmPlugin] WARNING: msg import failed ({e})")
 
@@ -784,6 +788,9 @@ class ArmPlugin:
             return self._send_ctrl(side, positions, kp, kd)
         elif action in ("start", "info"):
             return {"state": "ready"}
+        elif action == "arm_zero":
+            side = args.get("side", "both")
+            return self._send_arm_zero(side)
         elif action == "stop":
             return {"state": "idle"}
         return {"error": f"unknown action: {action}"}
@@ -843,6 +850,25 @@ class ArmPlugin:
             msg.cmds = cmds
             self._ctrl_publisher.publish(msg)
             return {"state": "moving", "side": side, "mode": "force_position"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _send_arm_zero(self, side: str) -> dict:
+        if not getattr(self, '_zero_publisher', None):
+            return {"error": "publisher not initialized"}
+        try:
+            joints = []
+            if side in ("left", "both"):
+                joints.extend(range(11, 18))  # 左臂 11-17
+            if side in ("right", "both"):
+                joints.extend(range(21, 28))  # 右臂 21-27
+
+            for motor_id in joints:
+                msg = String()
+                msg.data = str(motor_id)
+                self._zero_publisher.publish(msg)
+
+            return {"state": "zeroing", "side": side, "joints": joints}
         except Exception as e:
             return {"error": str(e)}
 
