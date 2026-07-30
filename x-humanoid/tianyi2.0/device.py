@@ -712,7 +712,7 @@ class HeadPlugin:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ArmPlugin:
-    """双臂14DOF控制 (位置模式 / 力位混合)"""
+    """双臂14DOF控制 (位置模式 / 力位混合 / 速度模式 / 电流模式)"""
 
     def __init__(self, plugin_config: dict, namespace: str, ros2):
         self._ns = namespace
@@ -721,16 +721,19 @@ class ArmPlugin:
         ros2.executor_tianyi.add_node(self._pub_node)
         self._pos_publisher = None
         self._ctrl_publisher = None
+        self._vel_publisher = None
+        self._cur_publisher = None
 
     def get_tool(self) -> dict:
         return {
             "name": "arm",
             "type": "actuator",
-            "description": "天轶2.0 双臂控制 — 每臂7DOF (肩3+肘1+腕3), 位置/力位混合模式",
+            "description": "天轶2.0 双臂控制 — 每臂7DOF (肩3+肘1+腕3), 位置/力位混合/速度/电流模式",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["move_pos", "move_ctrl", "arm_zero"],
+                    "action": {"type": "string",
+                               "enum": ["move_pos", "move_ctrl", "move_vel", "move_cur", "arm_zero"],
                                "description": "控制模式"},
                     "side": {"type": "string", "enum": ["left", "right", "both"],
                              "description": "控制哪只手臂"},
@@ -741,6 +744,10 @@ class ArmPlugin:
                            "description": "位置增益(7个), 范围[0,2000]"},
                     "kd": {"type": "array", "items": {"type": "number"},
                            "description": "速度增益(7个), 范围[0,300]"},
+                    "velocities": {"type": "array", "items": {"type": "number"},
+                                   "description": "7个关节速度(rad/s): [肩pitch, 肩roll, 肩yaw, 肘pitch, 腕yaw, 腕pitch, 腕roll]"},
+                    "currents": {"type": "array", "items": {"type": "number"},
+                                 "description": "7个关节电流(A): [肩pitch, 肩roll, 肩yaw, 肘pitch, 腕yaw, 腕pitch, 腕roll]"},
                 },
                 "required": ["action"],
                 "x-action-params": {
@@ -748,6 +755,10 @@ class ArmPlugin:
                                  "description": "位置模式: 移动手臂关节到指定角度(度)"},
                     "move_ctrl": {"params": ["side", "positions", "kp", "kd"],
                                   "description": "力位混合模式: 指定位置+增益"},
+                    "move_vel": {"params": ["side", "velocities"],
+                                 "description": "速度模式: 控制关节速度(rad/s)"},
+                    "move_cur": {"params": ["side", "currents"],
+                                 "description": "电流模式: 控制关节电流(A)"},
                     "arm_zero": {"params": ["side"],
                                  "description": "手臂关节标零: 发送关节ID到 /arm/cmd_set_zero"},
                 },
@@ -756,12 +767,16 @@ class ArmPlugin:
 
     def start(self):
         try:
-            from bodyctrl_msgs.msg import CmdSetMotorPosition, CmdMotorCtrl
+            from bodyctrl_msgs.msg import CmdSetMotorPosition, CmdMotorCtrl, CmdSetMotorSpeed, CmdSetMotorCurTor
             self._pos_publisher = self._pub_node.create_publisher(
                 CmdSetMotorPosition, "/arm/cmd_pos", _RELIABLE_QOS)
             self._ctrl_publisher = self._pub_node.create_publisher(
                 CmdMotorCtrl, "/arm/cmd_ctrl", _RELIABLE_QOS)
-            print("[ArmPlugin] publishers created")
+            self._vel_publisher = self._pub_node.create_publisher(
+                CmdSetMotorSpeed, "/arm/cmd_vel", _RELIABLE_QOS)
+            self._cur_publisher = self._pub_node.create_publisher(
+                CmdSetMotorCurTor, "/arm/cmd_current", _RELIABLE_QOS)
+            print("[ArmPlugin] publishers created (pos/ctrl/vel/cur)")
         except ImportError as e:
             print(f"[ArmPlugin] WARNING: msg import failed ({e})")
 
@@ -788,6 +803,18 @@ class ArmPlugin:
             if len(positions) != 7:
                 return {"error": "positions must have exactly 7 values (degrees)"}
             return self._send_ctrl(side, positions, kp, kd)
+        elif action == "move_vel":
+            side = args.get("side", "left")
+            velocities = args.get("velocities", [])
+            if len(velocities) != 7:
+                return {"error": "velocities must have exactly 7 values (rad/s)"}
+            return self._send_vel(side, velocities)
+        elif action == "move_cur":
+            side = args.get("side", "left")
+            currents = args.get("currents", [])
+            if len(currents) != 7:
+                return {"error": "currents must have exactly 7 values (A)"}
+            return self._send_cur(side, currents)
         elif action in ("start", "info"):
             return {"state": "ready"}
         elif action == "arm_zero":
@@ -796,6 +823,7 @@ class ArmPlugin:
         elif action == "stop":
             return {"state": "idle"}
         return {"error": f"unknown action: {action}"}
+
 
     def _send_pos(self, side: str, positions_deg: list, speed: float) -> dict:
         if not self._pos_publisher:
@@ -874,9 +902,66 @@ class ArmPlugin:
         except Exception as e:
             return {"error": str(e)}
 
+    def _send_vel(self, side: str, velocities: list) -> dict:
+        """速度模式: 控制关节速度 (rad/s)"""
+        if not self._vel_publisher:
+            return {"error": "velocity publisher not initialized"}
+        try:
+            from bodyctrl_msgs.msg import CmdSetMotorSpeed, SetMotorSpeed
+            msg = CmdSetMotorSpeed()
+            cmds = []
+            sides = []
+            if side in ("left", "both"):
+                sides.append(("left", 11))
+            if side in ("right", "both"):
+                sides.append(("right", 21))
+
+            for side_name, base_id in sides:
+                for i, vel in enumerate(velocities):
+                    cmd = SetMotorSpeed()
+                    cmd.name = base_id + i
+                    cmd.spd = vel  # rad/s
+                    cmd.cur = 5.0  # A (max current)
+                    cmds.append(cmd)
+
+            msg.cmds = cmds
+            self._vel_publisher.publish(msg)
+            return {"state": "moving", "side": side, "mode": "velocity", "joints": len(cmds)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _send_cur(self, side: str, currents: list) -> dict:
+        """电流模式: 控制关节电流 (A)"""
+        if not self._cur_publisher:
+            return {"error": "current publisher not initialized"}
+        try:
+            from bodyctrl_msgs.msg import CmdSetMotorCurTor, SetMotorCurTor
+            msg = CmdSetMotorCurTor()
+            cmds = []
+            sides = []
+            if side in ("left", "both"):
+                sides.append(("left", 11))
+            if side in ("right", "both"):
+                sides.append(("right", 21))
+
+            for side_name, base_id in sides:
+                for i, cur in enumerate(currents):
+                    cmd = SetMotorCurTor()
+                    cmd.name = base_id + i
+                    cmd.cur_tor = cur  # A
+                    cmd.ctrl_status = 0  # 电流模式
+                    cmds.append(cmd)
+
+            msg.cmds = cmds
+            self._cur_publisher.publish(msg)
+            return {"state": "moving", "side": side, "mode": "current", "joints": len(cmds)}
+        except Exception as e:
+            return {"error": str(e)}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WaistPlugin (actuator)
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 class WaistPlugin:
